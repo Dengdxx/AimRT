@@ -12,7 +12,6 @@ struct convert<aimrt::plugins::iceoryx2_plugin::Iceoryx2Plugin::Options> {
 
   static Node encode(const Options& rhs) {
     Node node;
-    node["shm_init_size"] = rhs.shm_init_size;
     node["max_slice_len"] = rhs.max_slice_len;
     node["allocation_strategy"] = rhs.allocation_strategy;
     node["node_name"] = rhs.node_name;
@@ -26,8 +25,6 @@ struct convert<aimrt::plugins::iceoryx2_plugin::Iceoryx2Plugin::Options> {
   static bool decode(const Node& node, Options& rhs) {
     if (!node.IsMap()) return false;
 
-    if (node["shm_init_size"])
-      rhs.shm_init_size = node["shm_init_size"].as<uint64_t>();
     if (node["max_slice_len"])
       rhs.max_slice_len = node["max_slice_len"].as<uint64_t>();
     if (node["allocation_strategy"])
@@ -122,7 +119,6 @@ void Iceoryx2Plugin::RegisterIceoryx2ChannelBackend() {
 
   // Configure backend with plugin options (sync all fields)
   Iceoryx2ChannelBackend::Options backend_options;
-  backend_options.shm_init_size = options_.shm_init_size;
   backend_options.max_slice_len = options_.max_slice_len;
   backend_options.allocation_strategy = options_.allocation_strategy;
   backend_options.node_name = options_.node_name;
@@ -133,8 +129,7 @@ void Iceoryx2Plugin::RegisterIceoryx2ChannelBackend() {
 
   iceoryx2_channel_backend_ptr->SetOptions(backend_options);
 
-  AIMRT_INFO("Iceoryx2 config: shm={}MB, max_slice={}MB, strategy={}, event_mode={}",
-             options_.shm_init_size / (1024 * 1024),
+  AIMRT_INFO("Iceoryx2 config: max_slice={}MB, strategy={}, event_mode={}",
              options_.max_slice_len / (1024 * 1024),
              options_.allocation_strategy,
              options_.use_event_mode);

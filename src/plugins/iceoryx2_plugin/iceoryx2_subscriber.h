@@ -12,8 +12,8 @@
 
 namespace aimrt::plugins::iceoryx2_plugin {
 
-// Maximum events to consume per poll to prevent starvation
-inline constexpr size_t kMaxEventsPerPoll = 256;
+static constexpr size_t kMaxEventsPerPoll = 256;
+static constexpr size_t kMaxMsgsPerReceive = 64;
 
 // Subscriber wrapper that optionally includes a Listener for event-based notification.
 // When Listener is set, this class implements FileDescriptorBased for WaitSet attachment.
@@ -73,7 +73,7 @@ class Iox2Subscriber : public iox2::FileDescriptorBased {
 
     auto sample_opt = std::move(sample_res.value());
     if (!sample_opt.has_value()) {
-      return false;  // No new samples
+      return false;
     }
 
     auto& sample = sample_opt.value();
@@ -89,13 +89,16 @@ class Iox2Subscriber : public iox2::FileDescriptorBased {
     return true;
   }
 
-  // Receive all available messages
-  size_t ReceiveAll() {
+  size_t ReceiveUpTo(size_t max_count) {
     size_t count = 0;
-    while (TryReceiveOne()) {
+    while (count < max_count && TryReceiveOne()) {
       ++count;
     }
     return count;
+  }
+
+  size_t ReceiveAll() {
+    return ReceiveUpTo(kMaxMsgsPerReceive);
   }
 
   const std::string& Url() const { return url_; }

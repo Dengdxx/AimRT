@@ -18,8 +18,7 @@ class Iceoryx2Plugin : public AimRTCorePluginBase {
  public:
   struct Options {
     // Shared memory configuration
-    uint64_t shm_init_size = 16 * 1024 * 1024;  // 16MB default
-    uint64_t max_slice_len = 4 * 1024 * 1024;   // 4MB default per message
+    uint64_t max_slice_len = 4 * 1024 * 1024;  // 4MB default per message
 
     // Allocation strategy: "static", "dynamic", "power_of_two"
     // TODO: Currently only "dynamic" is implemented

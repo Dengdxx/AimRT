@@ -4,6 +4,8 @@
 #include "iceoryx2_plugin/iceoryx2_channel_backend.h"
 #include "iceoryx2_plugin/global.h"
 
+#include <limits>
+
 #include "aimrt_module_cpp_interface/channel/channel_context.h"
 #include "core/util/thread_tools.h"
 #include "util/buffer_util.h"
@@ -16,7 +18,6 @@ struct convert<aimrt::plugins::iceoryx2_plugin::Iceoryx2ChannelBackend::Options>
 
   static Node encode(const Options& rhs) {
     Node node;
-    node["shm_init_size"] = rhs.shm_init_size;
     node["max_slice_len"] = rhs.max_slice_len;
     node["allocation_strategy"] = rhs.allocation_strategy;
     node["node_name"] = rhs.node_name;
@@ -29,8 +30,6 @@ struct convert<aimrt::plugins::iceoryx2_plugin::Iceoryx2ChannelBackend::Options>
 
   static bool decode(const Node& node, Options& rhs) {
     if (!node.IsMap()) return false;
-    if (node["shm_init_size"])
-      rhs.shm_init_size = node["shm_init_size"].as<uint64_t>();
     if (node["max_slice_len"])
       rhs.max_slice_len = node["max_slice_len"].as<uint64_t>();
     if (node["allocation_strategy"])
@@ -57,18 +56,14 @@ Iceoryx2ChannelBackend::~Iceoryx2ChannelBackend() {
 }
 
 void Iceoryx2ChannelBackend::Initialize(YAML::Node options_node) {
+  // FIX: Check state first WITHOUT changing it (prevents race condition)
+  // The state transition happens AFTER node is successfully created
   AIMRT_CHECK_ERROR_THROW(
-      std::atomic_exchange(&state_, State::kInit) == State::kPreInit,
+      state_.load(std::memory_order_acquire) == State::kPreInit,
       "Method can only be called when state is 'PreInit'.");
 
   if (options_node && !options_node.IsNull()) {
     options_ = options_node.as<Options>();
-  }
-
-  // Validate configuration
-  if (options_.max_slice_len > options_.shm_init_size) {
-    AIMRT_WARN("max_slice_len ({}) > shm_init_size ({}), this may cause allocation failures",
-               options_.max_slice_len, options_.shm_init_size);
   }
 
   // TODO(Dengdxx): allocation_strategy is currently not implemented.
@@ -108,6 +103,10 @@ void Iceoryx2ChannelBackend::Initialize(YAML::Node options_node) {
     node_.emplace(std::move(node_res.value()));
     AIMRT_INFO("Iceoryx2 node created with name: {}", node_name);
   }
+
+  // FIX: Only transition to kInit AFTER node is successfully created
+  // This prevents race condition where other threads see kInit but node_ is empty
+  state_.store(State::kInit, std::memory_order_release);
 
   AIMRT_INFO("Iceoryx2 channel backend initialized.");
 }
@@ -374,23 +373,26 @@ bool Iceoryx2ChannelBackend::Subscribe(
       }
 
       try {
-        // Parse header
+        constexpr size_t kMinHeaderSize = 4 + 1 + 1;
+        if (size < kMinHeaderSize) {
+          AIMRT_WARN("Message too small: {} bytes, minimum {}", size, kMinHeaderSize);
+          return;
+        }
+
         util::ConstBufferOperator buf_oper(static_cast<const char*>(data), size);
 
         uint32_t pkg_size = buf_oper.GetUint32();
         if (pkg_size != size) {
-          AIMRT_WARN("Package size mismatch: {} vs {}", pkg_size, size);
+          AIMRT_WARN("Package size mismatch, dropping: header {} vs actual {}", pkg_size, size);
+          return;
         }
 
-        // Get serialization type
         std::string serialization_type(buf_oper.GetString(util::BufferLenType::kUInt8));
 
-        // Create context and set serialization type
         auto ctx_ptr = std::make_shared<aimrt::channel::Context>(
             aimrt_channel_context_type_t::AIMRT_CHANNEL_SUBSCRIBER_CONTEXT);
         ctx_ptr->SetSerializationType(serialization_type);
 
-        // Get context metadata
         size_t ctx_num = buf_oper.GetUint8();
         for (size_t ii = 0; ii < ctx_num; ++ii) {
           auto key = buf_oper.GetString(util::BufferLenType::kUInt16);
@@ -400,7 +402,6 @@ bool Iceoryx2ChannelBackend::Subscribe(
 
         ctx_ptr->SetMetaValue(AIMRT_CHANNEL_CONTEXT_KEY_BACKEND, Name());
 
-        // Get remaining buffer (message data)
         auto remaining_buf = buf_oper.GetRemainingBuffer();
 
         it->second.tool->DoSubscribeCallback(
@@ -489,14 +490,16 @@ void Iceoryx2ChannelBackend::Publish(runtime::core::channel::MsgWrapper& msg_wra
     size_t buffer_count = buffer_view_ptr->Size();
     size_t msg_size = buffer_view_ptr->BufferSize();
 
-    // Calculate total SHM size:
-    // pkg_size(4) + ser_type_len(1) + ser_type + ctx_meta + msg_buffer
-    uint32_t header_size = 4 + 1 + serialization_type.size() + context_meta_kv_size;
+    size_t header_size = 4 + 1 + serialization_type.size() + context_meta_kv_size;
     size_t shm_size = header_size + msg_size;
 
+    if (shm_size > std::numeric_limits<uint32_t>::max()) {
+      AIMRT_ERROR("Message size {} exceeds uint32_t max, cannot encode", shm_size);
+      return;
+    }
+
     if (shm_size > options_.max_slice_len) {
-      AIMRT_ERROR("Message size {} exceeds max_slice_len {}, increase max_slice_len in config",
-                  shm_size, options_.max_slice_len);
+      AIMRT_ERROR("Message size {} exceeds max_slice_len {}", shm_size, options_.max_slice_len);
       return;
     }
 
@@ -550,7 +553,7 @@ void Iceoryx2ChannelBackend::Publish(runtime::core::channel::MsgWrapper& msg_wra
   }
 }
 
-void Iceoryx2ChannelBackend::PollingThreadFunc() {
+void Iceoryx2ChannelBackend::ConfigureListenerThread() {
   if (!options_.listener_thread_name.empty()) {
     runtime::core::util::SetNameForCurrentThread(options_.listener_thread_name);
   }
@@ -560,6 +563,10 @@ void Iceoryx2ChannelBackend::PollingThreadFunc() {
   if (!options_.listener_thread_sched_policy.empty()) {
     runtime::core::util::SetCpuSchedForCurrentThread(options_.listener_thread_sched_policy);
   }
+}
+
+void Iceoryx2ChannelBackend::PollingThreadFunc() {
+  ConfigureListenerThread();
 
   while (running_) {
     bool has_data = false;
@@ -581,15 +588,7 @@ void Iceoryx2ChannelBackend::PollingThreadFunc() {
 }
 
 void Iceoryx2ChannelBackend::EventLoopFunc() {
-  if (!options_.listener_thread_name.empty()) {
-    runtime::core::util::SetNameForCurrentThread(options_.listener_thread_name);
-  }
-  if (!options_.listener_thread_bind_cpu.empty()) {
-    runtime::core::util::BindCpuForCurrentThread(options_.listener_thread_bind_cpu);
-  }
-  if (!options_.listener_thread_sched_policy.empty()) {
-    runtime::core::util::SetCpuSchedForCurrentThread(options_.listener_thread_sched_policy);
-  }
+  ConfigureListenerThread();
 
   using namespace iox2;
 
@@ -620,8 +619,14 @@ void Iceoryx2ChannelBackend::EventLoopFunc() {
   while (running_) {
     auto result = waitset_->wait_and_process_once_with_timeout(on_event, bb::Duration::from_millis(100));
     if (!result.has_value()) {
-      AIMRT_WARN("WaitSet error, switching to polling mode");
-      // Actually fall back to polling mode
+      AIMRT_WARN("WaitSet error, switching to polling mode permanently");
+
+      {
+        std::lock_guard<std::mutex> lock(sub_mtx_);
+        waitset_entries_.clear();
+      }
+      waitset_.reset();
+
       PollingThreadFunc();
       return;
     }

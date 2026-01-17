@@ -6,7 +6,6 @@
 
 - ✅ **零拷贝通信** - 共享内存直接传输，无序列化开销
 - ✅ **无守护进程** - 不需要 RouDi（与 iceoryx1 不同）
-- ✅ **可配置 SHM** - 支持自定义共享内存大小
 - ✅ **性能统计** - 自动统计发布/订阅次数和字节数
 - ✅ **抽象封装** - `Iox2Publisher`/`Iox2Subscriber` 包装器
 
@@ -32,7 +31,6 @@ aimrt:
       - name: iceoryx2_plugin
         path: /path/to/aimrt_iceoryx2_plugin.so
         options:
-          shm_init_size: 16777216     # 16MB
           max_slice_len: 4194304      # 4MB per message
           node_name: "my_vision_node" # 可选，进程隔离标识
           listener_thread_name: "iox2_listener"
@@ -44,7 +42,6 @@ aimrt:
     backends:
       - type: iceoryx2
         options:
-          shm_init_size: 16777216
           max_slice_len: 4194304
     
     pub_topics_options:
@@ -60,7 +57,6 @@ aimrt:
 
 | 配置项 | 类型 | 默认值 | 说明 |
 |--------|------|--------|------|
-| `shm_init_size` | uint64 | 16MB | 共享内存初始大小 |
 | `max_slice_len` | uint64 | 4MB | 单条消息最大大小 |
 | `node_name` | string | `aimrt_iox2_{pid}` | 节点名称，用于进程隔离和调试 |
 | `listener_thread_name` | string | 空 | 监听线程名称 |

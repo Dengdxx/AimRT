@@ -27,13 +27,12 @@
 namespace aimrt::plugins::iceoryx2_plugin {
 
 // Default configuration constants
-static constexpr uint64_t kDefaultShmInitSize = 16 * 1024 * 1024;  // 16MB
-static constexpr uint64_t kDefaultMaxSliceLen = 4 * 1024 * 1024;   // 4MB
+static constexpr uint64_t kDefaultMaxSliceLen = 4 * 1024 * 1024;  // 4MB
+static constexpr size_t kMaxMsgsPerSubscriberPerPoll = 64;
 
 class Iceoryx2ChannelBackend : public runtime::core::channel::ChannelBackendBase {
  public:
   struct Options {
-    uint64_t shm_init_size = kDefaultShmInitSize;
     uint64_t max_slice_len = kDefaultMaxSliceLen;
     std::string allocation_strategy = "dynamic";
     std::string node_name;
@@ -104,8 +103,9 @@ class Iceoryx2ChannelBackend : public runtime::core::channel::ChannelBackendBase
   // Polling/Event loop thread
   std::atomic<bool> running_{false};
   std::thread poller_thread_;
-  void PollingThreadFunc();  // Legacy polling mode
-  void EventLoopFunc();      // New event-based mode
+  void ConfigureListenerThread();
+  void PollingThreadFunc();
+  void EventLoopFunc();
 
   // Stats aggregation
   Iox2Stats pub_stats_;

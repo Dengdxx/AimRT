@@ -151,3 +151,85 @@ TEST(Iceoryx2PluginTest, PubSub) {
 
   backend.Shutdown();
 }
+
+TEST(Iceoryx2PluginTest, EventModePubSub) {
+  Iceoryx2ChannelBackend backend;
+  YAML::Node options;
+  options["listener_thread_name"] = "event_listener";
+  options["use_event_mode"] = true;
+  backend.Initialize(options);
+
+  aimrt::util::TypeSupportRef type_ref(&mock::kStringSupportBase);
+  aimrt::runtime::core::channel::TopicInfo topic_info;
+  topic_info.msg_type = "std::string";
+  topic_info.topic_name = "event_test_topic";
+  topic_info.pkg_path = "test_pkg";
+  topic_info.module_name = "test_module";
+  topic_info.msg_type_support_ref = type_ref;
+
+  std::promise<std::string> msg_promise;
+  auto msg_future = msg_promise.get_future();
+
+  aimrt::runtime::core::channel::SubscribeWrapper sub_wrapper;
+  sub_wrapper.info = topic_info;
+  sub_wrapper.callback = [&](aimrt::runtime::core::channel::MsgWrapper& msg_wrapper, std::function<void()>&&) {
+    if (msg_wrapper.msg_ptr) {
+      msg_promise.set_value(*static_cast<const std::string*>(msg_wrapper.msg_ptr));
+    } else {
+      msg_promise.set_exception(std::make_exception_ptr(std::runtime_error("Received null msg")));
+    }
+  };
+
+  EXPECT_TRUE(backend.Subscribe(sub_wrapper));
+
+  aimrt::runtime::core::channel::PublishTypeWrapper pub_wrapper;
+  pub_wrapper.info = topic_info;
+  EXPECT_TRUE(backend.RegisterPublishType(pub_wrapper));
+
+  backend.Start();
+
+  std::string send_msg = "Hello Event Mode";
+  aimrt::runtime::core::channel::MsgWrapper msg_to_send{topic_info};
+  msg_to_send.msg_ptr = &send_msg;
+
+  backend.Publish(msg_to_send);
+
+  auto status = msg_future.wait_for(std::chrono::seconds(3));
+  EXPECT_EQ(status, std::future_status::ready);
+
+  if (status == std::future_status::ready) {
+    EXPECT_EQ(msg_future.get(), send_msg);
+  }
+
+  backend.Shutdown();
+}
+
+TEST(Iceoryx2PluginTest, OversizedMessageRejection) {
+  Iceoryx2ChannelBackend backend;
+  YAML::Node options;
+  options["max_slice_len"] = 100;
+  options["use_event_mode"] = false;
+  backend.Initialize(options);
+
+  aimrt::util::TypeSupportRef type_ref(&mock::kStringSupportBase);
+  aimrt::runtime::core::channel::TopicInfo topic_info;
+  topic_info.msg_type = "std::string";
+  topic_info.topic_name = "oversize_test";
+  topic_info.pkg_path = "test_pkg";
+  topic_info.module_name = "test_module";
+  topic_info.msg_type_support_ref = type_ref;
+
+  aimrt::runtime::core::channel::PublishTypeWrapper pub_wrapper;
+  pub_wrapper.info = topic_info;
+  EXPECT_TRUE(backend.RegisterPublishType(pub_wrapper));
+
+  backend.Start();
+
+  std::string large_msg(200, 'X');
+  aimrt::runtime::core::channel::MsgWrapper msg_to_send{topic_info};
+  msg_to_send.msg_ptr = &large_msg;
+
+  EXPECT_NO_THROW(backend.Publish(msg_to_send));
+
+  backend.Shutdown();
+}

@@ -296,6 +296,10 @@ bool Iceoryx2ChannelBackend::Subscribe(
 
     // Check if already registered
     if (subscribers_.count(url)) {
+      auto it = subscriber_data_.find(url);
+      if (it != subscriber_data_.end() && it->second.tool) {
+        it->second.tool->AddSubscribeWrapper(&subscribe_wrapper);
+      }
       return true;
     }
 

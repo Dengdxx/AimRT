@@ -64,7 +64,10 @@ function(copy_plugin_if_enabled PLUGIN_NAME)
   string(TOUPPER ${PLUGIN_NAME} PLUGIN_BUILD_FLAG)
   set(PLUGIN_BUILD_FLAG "AIMRT_BUILD_${PLUGIN_BUILD_FLAG}")
 
-  if(${PLUGIN_BUILD_FLAG})
+  # Check both the build flag AND that the target actually exists
+  # This handles cases where the flag was set but the target couldn't be built
+  # (e.g., Rust toolchain unavailable for iceoryx2_plugin)
+  if(${PLUGIN_BUILD_FLAG} AND TARGET aimrt::plugins::${PLUGIN_NAME})
     add_custom_target(
       copy_${PLUGIN_NAME}
       COMMAND ${CMAKE_COMMAND} -E make_directory ${AIMRT_PY_PKG_DIR}/aimrt_py/

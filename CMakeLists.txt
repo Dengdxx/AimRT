@@ -276,6 +276,15 @@ if(AIMRT_BUILD_RUNTIME)
     endif()
   endif()
 
+  if(AIMRT_BUILD_ICEORYX2_PLUGIN)
+    include(GetIceoryx2)
+    if(NOT RUST_TOOLCHAIN_READY)
+      message(WARNING "ICEORYX2_PLUGIN: Rust nightly toolchain not available and auto-install failed. " "Will not compile iceoryx2 plugin. "
+                      "Install Rust manually: curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- --default-toolchain nightly")
+      set(AIMRT_BUILD_ICEORYX2_PLUGIN OFF)
+    endif()
+  endif()
+
   if(AIMRT_BUILD_OPENTELEMETRY_PLUGIN)
     include(GetProtobuf)
     include(GetNlohmannJson)

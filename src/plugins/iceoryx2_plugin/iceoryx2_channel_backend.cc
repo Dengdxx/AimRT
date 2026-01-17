@@ -4,7 +4,10 @@
 #include "iceoryx2_plugin/iceoryx2_channel_backend.h"
 #include "iceoryx2_plugin/global.h"
 
+#include <limits>
+
 #include "aimrt_module_cpp_interface/channel/channel_context.h"
+#include "core/util/thread_tools.h"
 #include "util/buffer_util.h"
 #include "util/url_encode.h"
 
@@ -15,24 +18,30 @@ struct convert<aimrt::plugins::iceoryx2_plugin::Iceoryx2ChannelBackend::Options>
 
   static Node encode(const Options& rhs) {
     Node node;
-    node["shm_init_size"] = rhs.shm_init_size;
     node["max_slice_len"] = rhs.max_slice_len;
     node["allocation_strategy"] = rhs.allocation_strategy;
+    node["node_name"] = rhs.node_name;
     node["listener_thread_name"] = rhs.listener_thread_name;
+    node["listener_thread_sched_policy"] = rhs.listener_thread_sched_policy;
+    node["listener_thread_bind_cpu"] = rhs.listener_thread_bind_cpu;
     node["use_event_mode"] = rhs.use_event_mode;
     return node;
   }
 
   static bool decode(const Node& node, Options& rhs) {
     if (!node.IsMap()) return false;
-    if (node["shm_init_size"])
-      rhs.shm_init_size = node["shm_init_size"].as<uint64_t>();
     if (node["max_slice_len"])
       rhs.max_slice_len = node["max_slice_len"].as<uint64_t>();
     if (node["allocation_strategy"])
       rhs.allocation_strategy = node["allocation_strategy"].as<std::string>();
+    if (node["node_name"])
+      rhs.node_name = node["node_name"].as<std::string>();
     if (node["listener_thread_name"])
       rhs.listener_thread_name = node["listener_thread_name"].as<std::string>();
+    if (node["listener_thread_sched_policy"])
+      rhs.listener_thread_sched_policy = node["listener_thread_sched_policy"].as<std::string>();
+    if (node["listener_thread_bind_cpu"])
+      rhs.listener_thread_bind_cpu = node["listener_thread_bind_cpu"].as<std::vector<uint32_t>>();
     if (node["use_event_mode"])
       rhs.use_event_mode = node["use_event_mode"].as<bool>();
     return true;
@@ -47,34 +56,57 @@ Iceoryx2ChannelBackend::~Iceoryx2ChannelBackend() {
 }
 
 void Iceoryx2ChannelBackend::Initialize(YAML::Node options_node) {
+  // FIX: Check state first WITHOUT changing it (prevents race condition)
+  // The state transition happens AFTER node is successfully created
   AIMRT_CHECK_ERROR_THROW(
-      std::atomic_exchange(&state_, State::kInit) == State::kPreInit,
+      state_.load(std::memory_order_acquire) == State::kPreInit,
       "Method can only be called when state is 'PreInit'.");
 
   if (options_node && !options_node.IsNull()) {
     options_ = options_node.as<Options>();
   }
 
-  // Validate configuration
-  if (options_.max_slice_len > options_.shm_init_size) {
-    AIMRT_WARN("max_slice_len ({}) > shm_init_size ({}), this may cause allocation failures",
-               options_.max_slice_len, options_.shm_init_size);
+  // TODO(Dengdxx): allocation_strategy is currently not implemented.
+  // Future work: implement static/dynamic/power_of_two allocation strategies
+  // for shared memory management optimization.
+  if (!options_.allocation_strategy.empty() &&
+      options_.allocation_strategy != "dynamic") {
+    AIMRT_WARN("allocation_strategy '{}' is not yet implemented, only 'dynamic' is supported",
+               options_.allocation_strategy);
   }
 
-  // Validate allocation_strategy
-  if (options_.allocation_strategy != "static" &&
-      options_.allocation_strategy != "dynamic" &&
-      options_.allocation_strategy != "power_of_two") {
-    AIMRT_WARN("Unknown allocation_strategy '{}', using 'dynamic'", options_.allocation_strategy);
-    options_.allocation_strategy = "dynamic";
+  // Create iox2 Node with optional name for process isolation
+  std::string node_name = options_.node_name;
+  if (node_name.empty()) {
+#if defined(_WIN32)
+    node_name = "aimrt_iox2_" + std::to_string(GetProcessId(GetCurrentProcess()));
+#else
+    node_name = "aimrt_iox2_" + std::to_string(getpid());
+#endif
   }
 
-  // Create iox2 Node directly - no Manager needed (iox2 has no RouDi)
-  auto node_res = iox2::NodeBuilder().create<iox2::ServiceType::Ipc>();
-  if (!node_res.has_value()) {
-    AIMRT_ERROR_THROW("Failed to create Iceoryx2 Node.");
+  auto node_name_res = iox2::NodeName::create(node_name.c_str());
+  if (!node_name_res.has_value()) {
+    AIMRT_WARN("Invalid node name '{}', creating node without name", node_name);
+    auto node_res = iox2::NodeBuilder().create<iox2::ServiceType::Ipc>();
+    if (!node_res.has_value()) {
+      AIMRT_ERROR_THROW("Failed to create Iceoryx2 Node.");
+    }
+    node_.emplace(std::move(node_res.value()));
+  } else {
+    auto node_res = iox2::NodeBuilder()
+                        .name(std::move(node_name_res.value()))
+                        .create<iox2::ServiceType::Ipc>();
+    if (!node_res.has_value()) {
+      AIMRT_ERROR_THROW("Failed to create Iceoryx2 Node with name '{}'.", node_name);
+    }
+    node_.emplace(std::move(node_res.value()));
+    AIMRT_INFO("Iceoryx2 node created with name: {}", node_name);
   }
-  node_.emplace(std::move(node_res.value()));
+
+  // FIX: Only transition to kInit AFTER node is successfully created
+  // This prevents race condition where other threads see kInit but node_ is empty
+  state_.store(State::kInit, std::memory_order_release);
 
   AIMRT_INFO("Iceoryx2 channel backend initialized.");
 }
@@ -116,18 +148,17 @@ void Iceoryx2ChannelBackend::Start() {
           // Attach with 5 second deadline (will wake up periodically even without events)
           auto guard_res = waitset_->attach_deadline(*sub, bb::Duration::from_secs(5));
           if (guard_res.has_value()) {
-            waitset_guards_.push_back(std::move(guard_res.value()));
-            waitset_guard_urls_.push_back(url);  // Store URL in same order as guard
+            waitset_entries_.push_back({std::move(guard_res.value()), url});
             AIMRT_TRACE("Attached subscriber {} to WaitSet", url);
           } else {
             AIMRT_WARN("Failed to attach subscriber {} to WaitSet", url);
           }
         }
 
-        use_event_loop = !waitset_guards_.empty();
+        use_event_loop = !waitset_entries_.empty();
         if (use_event_loop) {
           AIMRT_INFO("Iceoryx2 channel backend started in EVENT mode ({} subscribers attached)",
-                     waitset_guards_.size());
+                     waitset_entries_.size());
         }
       } else {
         AIMRT_WARN("Failed to create WaitSet, falling back to polling mode");
@@ -153,9 +184,8 @@ void Iceoryx2ChannelBackend::Shutdown() {
     poller_thread_.join();
   }
 
-  // Clear WaitSet guards first (must be released before subscribers)
-  waitset_guards_.clear();
-  waitset_guard_urls_.clear();
+  // Clear WaitSet entries first (must be released before subscribers)
+  waitset_entries_.clear();
   waitset_.reset();
 
   {
@@ -266,6 +296,10 @@ bool Iceoryx2ChannelBackend::Subscribe(
 
     // Check if already registered
     if (subscribers_.count(url)) {
+      auto it = subscriber_data_.find(url);
+      if (it != subscriber_data_.end() && it->second.tool) {
+        it->second.tool->AddSubscribeWrapper(&subscribe_wrapper);
+      }
       return true;
     }
 
@@ -343,23 +377,26 @@ bool Iceoryx2ChannelBackend::Subscribe(
       }
 
       try {
-        // Parse header
+        constexpr size_t kMinHeaderSize = 4 + 1 + 1;
+        if (size < kMinHeaderSize) {
+          AIMRT_WARN("Message too small: {} bytes, minimum {}", size, kMinHeaderSize);
+          return;
+        }
+
         util::ConstBufferOperator buf_oper(static_cast<const char*>(data), size);
 
         uint32_t pkg_size = buf_oper.GetUint32();
         if (pkg_size != size) {
-          AIMRT_WARN("Package size mismatch: {} vs {}", pkg_size, size);
+          AIMRT_WARN("Package size mismatch, dropping: header {} vs actual {}", pkg_size, size);
+          return;
         }
 
-        // Get serialization type
         std::string serialization_type(buf_oper.GetString(util::BufferLenType::kUInt8));
 
-        // Create context and set serialization type
         auto ctx_ptr = std::make_shared<aimrt::channel::Context>(
             aimrt_channel_context_type_t::AIMRT_CHANNEL_SUBSCRIBER_CONTEXT);
         ctx_ptr->SetSerializationType(serialization_type);
 
-        // Get context metadata
         size_t ctx_num = buf_oper.GetUint8();
         for (size_t ii = 0; ii < ctx_num; ++ii) {
           auto key = buf_oper.GetString(util::BufferLenType::kUInt16);
@@ -369,7 +406,6 @@ bool Iceoryx2ChannelBackend::Subscribe(
 
         ctx_ptr->SetMetaValue(AIMRT_CHANNEL_CONTEXT_KEY_BACKEND, Name());
 
-        // Get remaining buffer (message data)
         auto remaining_buf = buf_oper.GetRemainingBuffer();
 
         it->second.tool->DoSubscribeCallback(
@@ -379,6 +415,8 @@ bool Iceoryx2ChannelBackend::Subscribe(
         sub_stats_.Add(size);
       } catch (const std::exception& e) {
         AIMRT_WARN("Failed to parse iceoryx2 message: {}", e.what());
+      } catch (...) {
+        AIMRT_WARN("Failed to parse iceoryx2 message: unknown exception");
       }
     });
 
@@ -456,10 +494,18 @@ void Iceoryx2ChannelBackend::Publish(runtime::core::channel::MsgWrapper& msg_wra
     size_t buffer_count = buffer_view_ptr->Size();
     size_t msg_size = buffer_view_ptr->BufferSize();
 
-    // Calculate total SHM size:
-    // pkg_size(4) + ser_type_len(1) + ser_type + ctx_meta + msg_buffer
-    uint32_t header_size = 4 + 1 + serialization_type.size() + context_meta_kv_size;
+    size_t header_size = 4 + 1 + serialization_type.size() + context_meta_kv_size;
     size_t shm_size = header_size + msg_size;
+
+    if (shm_size > std::numeric_limits<uint32_t>::max()) {
+      AIMRT_ERROR("Message size {} exceeds uint32_t max, cannot encode", shm_size);
+      return;
+    }
+
+    if (shm_size > options_.max_slice_len) {
+      AIMRT_ERROR("Message size {} exceeds max_slice_len {}", shm_size, options_.max_slice_len);
+      return;
+    }
 
     // OPTIMIZATION: Use thread_local to avoid heap allocation on hot path
     thread_local std::vector<uint8_t> tl_header_buffer;
@@ -511,7 +557,21 @@ void Iceoryx2ChannelBackend::Publish(runtime::core::channel::MsgWrapper& msg_wra
   }
 }
 
+void Iceoryx2ChannelBackend::ConfigureListenerThread() {
+  if (!options_.listener_thread_name.empty()) {
+    runtime::core::util::SetNameForCurrentThread(options_.listener_thread_name);
+  }
+  if (!options_.listener_thread_bind_cpu.empty()) {
+    runtime::core::util::BindCpuForCurrentThread(options_.listener_thread_bind_cpu);
+  }
+  if (!options_.listener_thread_sched_policy.empty()) {
+    runtime::core::util::SetCpuSchedForCurrentThread(options_.listener_thread_sched_policy);
+  }
+}
+
 void Iceoryx2ChannelBackend::PollingThreadFunc() {
+  ConfigureListenerThread();
+
   while (running_) {
     bool has_data = false;
 
@@ -532,6 +592,8 @@ void Iceoryx2ChannelBackend::PollingThreadFunc() {
 }
 
 void Iceoryx2ChannelBackend::EventLoopFunc() {
+  ConfigureListenerThread();
+
   using namespace iox2;
 
   auto on_event = [this](WaitSetAttachmentId<ServiceType::Ipc> id) -> CallbackProgression {
@@ -542,10 +604,9 @@ void Iceoryx2ChannelBackend::EventLoopFunc() {
     // Check which subscriber(s) have events and process them
     std::lock_guard<std::mutex> lock(sub_mtx_);
 
-    for (size_t i = 0; i < waitset_guards_.size() && i < waitset_guard_urls_.size(); ++i) {
-      if (id.has_event_from(waitset_guards_[i]) || id.has_missed_deadline(waitset_guards_[i])) {
-        const auto& url = waitset_guard_urls_[i];
-        auto it = subscribers_.find(url);
+    for (const auto& entry : waitset_entries_) {
+      if (id.has_event_from(entry.guard) || id.has_missed_deadline(entry.guard)) {
+        auto it = subscribers_.find(entry.url);
         if (it != subscribers_.end()) {
           // Consume events from listener first
           it->second->ConsumeEvents();
@@ -562,8 +623,14 @@ void Iceoryx2ChannelBackend::EventLoopFunc() {
   while (running_) {
     auto result = waitset_->wait_and_process_once_with_timeout(on_event, bb::Duration::from_millis(100));
     if (!result.has_value()) {
-      AIMRT_WARN("WaitSet error, switching to polling mode");
-      // Actually fall back to polling mode
+      AIMRT_WARN("WaitSet error, switching to polling mode permanently");
+
+      {
+        std::lock_guard<std::mutex> lock(sub_mtx_);
+        waitset_entries_.clear();
+      }
+      waitset_.reset();
+
       PollingThreadFunc();
       return;
     }

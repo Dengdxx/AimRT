@@ -1,0 +1,68 @@
+# AimRT Build & Test Dockerfile
+# Based on ros:humble-ros-core-jammy for ROS2 support
+FROM ros:humble-ros-core-jammy
+
+# Maintainer
+LABEL maintainer="AimRT Team"
+
+# Use mirror for faster downloads in China
+ARG USE_MIRROR=true
+
+# Configure apt mirrors
+RUN if [ "$USE_MIRROR" = "true" ]; then \
+        sed -i 's@http://archive.ubuntu.com@https://mirrors.tuna.tsinghua.edu.cn@g' /etc/apt/sources.list && \
+        sed -i 's@http://security.ubuntu.com@https://mirrors.tuna.tsinghua.edu.cn@g' /etc/apt/sources.list && \
+        sed -i 's@http://ports.ubuntu.com@https://mirrors.tuna.tsinghua.edu.cn@g' /etc/apt/sources.list; \
+    fi
+
+# Remove ros2-latest.list to avoid GPG key errors
+RUN rm -f /etc/apt/sources.list.d/ros2-latest.list || true
+
+# Install build dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    curl \
+    wget \
+    git \
+    build-essential \
+    autoconf \
+    libtool \
+    pkg-config \
+    python3.10 \
+    python3-pip \
+    python3-venv \
+    make \
+    vim \
+    zip \
+    lcov \
+    bc \
+    doxygen \
+    libglib2.0-dev \
+    libcurl4-openssl-dev \
+    libacl1-dev \
+    ca-certificates \
+    clang \
+    libclang-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install CMake 3.28
+RUN pip3 install --no-cache-dir cmake==3.28.0
+
+# Install Python packages
+RUN pip3 install --no-cache-dir \
+    pyinstaller \
+    jinja2 \
+    setuptools==74.1.2 \
+    pyyaml \
+    sphinx \
+    sphinx_rtd_theme \
+    sphinx-design \
+    myst-parser \
+    build \
+    linkify-it-py \
+    sphinx_multiversion
+
+# Set working directory
+WORKDIR /workspace
+
+# Entry point
+CMD ["/bin/bash"]

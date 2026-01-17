@@ -42,7 +42,7 @@ target_link_libraries(
   ${PROJECT_NAME}
   PRIVATE ${PROJECT_NAME}_obj)
 
-set_target_properties(${PROJECT_NAME} PROPERTIES PREFIX "" OUTPUT_NAME "aimrt_iceoryx2_plugin")
+set_target_properties(${PROJECT_NAME} PROPERTIES OUTPUT_NAME "aimrt_iceoryx2_plugin")
 
 # ============================================================================
 # Unit tests

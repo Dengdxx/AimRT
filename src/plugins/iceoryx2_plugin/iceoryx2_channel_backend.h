@@ -12,6 +12,12 @@
 #include <unordered_map>
 #include <vector>
 
+#if defined(_WIN32)
+  #include <windows.h>
+#else
+  #include <unistd.h>
+#endif
+
 #include "core/channel/channel_backend_base.h"
 #include "core/channel/channel_backend_tools.h"
 #include "iceoryx2_plugin/iceoryx2_publisher.h"
@@ -30,8 +36,11 @@ class Iceoryx2ChannelBackend : public runtime::core::channel::ChannelBackendBase
     uint64_t shm_init_size = kDefaultShmInitSize;
     uint64_t max_slice_len = kDefaultMaxSliceLen;
     std::string allocation_strategy = "dynamic";
+    std::string node_name;
     std::string listener_thread_name;
-    bool use_event_mode = true;  // Use event-based (WaitSet) instead of polling
+    std::string listener_thread_sched_policy;
+    std::vector<uint32_t> listener_thread_bind_cpu;
+    bool use_event_mode = true;
   };
 
  public:
@@ -85,8 +94,12 @@ class Iceoryx2ChannelBackend : public runtime::core::channel::ChannelBackendBase
 
   // WaitSet for event-based mode
   std::optional<iox2::WaitSet<iox2::ServiceType::Ipc>> waitset_;
-  std::vector<iox2::WaitSetGuard<iox2::ServiceType::Ipc>> waitset_guards_;
-  std::vector<std::string> waitset_guard_urls_;  // URLs in same order as guards
+
+  struct WaitSetEntry {
+    iox2::WaitSetGuard<iox2::ServiceType::Ipc> guard;
+    std::string url;
+  };
+  std::vector<WaitSetEntry> waitset_entries_;
 
   // Polling/Event loop thread
   std::atomic<bool> running_{false};

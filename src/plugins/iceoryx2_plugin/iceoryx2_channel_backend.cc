@@ -5,6 +5,7 @@
 #include "iceoryx2_plugin/global.h"
 
 #include "aimrt_module_cpp_interface/channel/channel_context.h"
+#include "core/util/thread_tools.h"
 #include "util/buffer_util.h"
 #include "util/url_encode.h"
 
@@ -18,7 +19,10 @@ struct convert<aimrt::plugins::iceoryx2_plugin::Iceoryx2ChannelBackend::Options>
     node["shm_init_size"] = rhs.shm_init_size;
     node["max_slice_len"] = rhs.max_slice_len;
     node["allocation_strategy"] = rhs.allocation_strategy;
+    node["node_name"] = rhs.node_name;
     node["listener_thread_name"] = rhs.listener_thread_name;
+    node["listener_thread_sched_policy"] = rhs.listener_thread_sched_policy;
+    node["listener_thread_bind_cpu"] = rhs.listener_thread_bind_cpu;
     node["use_event_mode"] = rhs.use_event_mode;
     return node;
   }
@@ -31,8 +35,14 @@ struct convert<aimrt::plugins::iceoryx2_plugin::Iceoryx2ChannelBackend::Options>
       rhs.max_slice_len = node["max_slice_len"].as<uint64_t>();
     if (node["allocation_strategy"])
       rhs.allocation_strategy = node["allocation_strategy"].as<std::string>();
+    if (node["node_name"])
+      rhs.node_name = node["node_name"].as<std::string>();
     if (node["listener_thread_name"])
       rhs.listener_thread_name = node["listener_thread_name"].as<std::string>();
+    if (node["listener_thread_sched_policy"])
+      rhs.listener_thread_sched_policy = node["listener_thread_sched_policy"].as<std::string>();
+    if (node["listener_thread_bind_cpu"])
+      rhs.listener_thread_bind_cpu = node["listener_thread_bind_cpu"].as<std::vector<uint32_t>>();
     if (node["use_event_mode"])
       rhs.use_event_mode = node["use_event_mode"].as<bool>();
     return true;
@@ -61,20 +71,43 @@ void Iceoryx2ChannelBackend::Initialize(YAML::Node options_node) {
                options_.max_slice_len, options_.shm_init_size);
   }
 
-  // Validate allocation_strategy
-  if (options_.allocation_strategy != "static" &&
-      options_.allocation_strategy != "dynamic" &&
-      options_.allocation_strategy != "power_of_two") {
-    AIMRT_WARN("Unknown allocation_strategy '{}', using 'dynamic'", options_.allocation_strategy);
-    options_.allocation_strategy = "dynamic";
+  // TODO(Dengdxx): allocation_strategy is currently not implemented.
+  // Future work: implement static/dynamic/power_of_two allocation strategies
+  // for shared memory management optimization.
+  if (!options_.allocation_strategy.empty() &&
+      options_.allocation_strategy != "dynamic") {
+    AIMRT_WARN("allocation_strategy '{}' is not yet implemented, only 'dynamic' is supported",
+               options_.allocation_strategy);
   }
 
-  // Create iox2 Node directly - no Manager needed (iox2 has no RouDi)
-  auto node_res = iox2::NodeBuilder().create<iox2::ServiceType::Ipc>();
-  if (!node_res.has_value()) {
-    AIMRT_ERROR_THROW("Failed to create Iceoryx2 Node.");
+  // Create iox2 Node with optional name for process isolation
+  std::string node_name = options_.node_name;
+  if (node_name.empty()) {
+#if defined(_WIN32)
+    node_name = "aimrt_iox2_" + std::to_string(GetProcessId(GetCurrentProcess()));
+#else
+    node_name = "aimrt_iox2_" + std::to_string(getpid());
+#endif
   }
-  node_.emplace(std::move(node_res.value()));
+
+  auto node_name_res = iox2::NodeName::create(node_name.c_str());
+  if (!node_name_res.has_value()) {
+    AIMRT_WARN("Invalid node name '{}', creating node without name", node_name);
+    auto node_res = iox2::NodeBuilder().create<iox2::ServiceType::Ipc>();
+    if (!node_res.has_value()) {
+      AIMRT_ERROR_THROW("Failed to create Iceoryx2 Node.");
+    }
+    node_.emplace(std::move(node_res.value()));
+  } else {
+    auto node_res = iox2::NodeBuilder()
+                        .name(std::move(node_name_res.value()))
+                        .create<iox2::ServiceType::Ipc>();
+    if (!node_res.has_value()) {
+      AIMRT_ERROR_THROW("Failed to create Iceoryx2 Node with name '{}'.", node_name);
+    }
+    node_.emplace(std::move(node_res.value()));
+    AIMRT_INFO("Iceoryx2 node created with name: {}", node_name);
+  }
 
   AIMRT_INFO("Iceoryx2 channel backend initialized.");
 }
@@ -116,18 +149,17 @@ void Iceoryx2ChannelBackend::Start() {
           // Attach with 5 second deadline (will wake up periodically even without events)
           auto guard_res = waitset_->attach_deadline(*sub, bb::Duration::from_secs(5));
           if (guard_res.has_value()) {
-            waitset_guards_.push_back(std::move(guard_res.value()));
-            waitset_guard_urls_.push_back(url);  // Store URL in same order as guard
+            waitset_entries_.push_back({std::move(guard_res.value()), url});
             AIMRT_TRACE("Attached subscriber {} to WaitSet", url);
           } else {
             AIMRT_WARN("Failed to attach subscriber {} to WaitSet", url);
           }
         }
 
-        use_event_loop = !waitset_guards_.empty();
+        use_event_loop = !waitset_entries_.empty();
         if (use_event_loop) {
           AIMRT_INFO("Iceoryx2 channel backend started in EVENT mode ({} subscribers attached)",
-                     waitset_guards_.size());
+                     waitset_entries_.size());
         }
       } else {
         AIMRT_WARN("Failed to create WaitSet, falling back to polling mode");
@@ -153,9 +185,8 @@ void Iceoryx2ChannelBackend::Shutdown() {
     poller_thread_.join();
   }
 
-  // Clear WaitSet guards first (must be released before subscribers)
-  waitset_guards_.clear();
-  waitset_guard_urls_.clear();
+  // Clear WaitSet entries first (must be released before subscribers)
+  waitset_entries_.clear();
   waitset_.reset();
 
   {
@@ -379,6 +410,8 @@ bool Iceoryx2ChannelBackend::Subscribe(
         sub_stats_.Add(size);
       } catch (const std::exception& e) {
         AIMRT_WARN("Failed to parse iceoryx2 message: {}", e.what());
+      } catch (...) {
+        AIMRT_WARN("Failed to parse iceoryx2 message: unknown exception");
       }
     });
 
@@ -461,6 +494,12 @@ void Iceoryx2ChannelBackend::Publish(runtime::core::channel::MsgWrapper& msg_wra
     uint32_t header_size = 4 + 1 + serialization_type.size() + context_meta_kv_size;
     size_t shm_size = header_size + msg_size;
 
+    if (shm_size > options_.max_slice_len) {
+      AIMRT_ERROR("Message size {} exceeds max_slice_len {}, increase max_slice_len in config",
+                  shm_size, options_.max_slice_len);
+      return;
+    }
+
     // OPTIMIZATION: Use thread_local to avoid heap allocation on hot path
     thread_local std::vector<uint8_t> tl_header_buffer;
     thread_local std::vector<const void*> tl_fragments;
@@ -512,6 +551,16 @@ void Iceoryx2ChannelBackend::Publish(runtime::core::channel::MsgWrapper& msg_wra
 }
 
 void Iceoryx2ChannelBackend::PollingThreadFunc() {
+  if (!options_.listener_thread_name.empty()) {
+    runtime::core::util::SetNameForCurrentThread(options_.listener_thread_name);
+  }
+  if (!options_.listener_thread_bind_cpu.empty()) {
+    runtime::core::util::BindCpuForCurrentThread(options_.listener_thread_bind_cpu);
+  }
+  if (!options_.listener_thread_sched_policy.empty()) {
+    runtime::core::util::SetCpuSchedForCurrentThread(options_.listener_thread_sched_policy);
+  }
+
   while (running_) {
     bool has_data = false;
 
@@ -532,6 +581,16 @@ void Iceoryx2ChannelBackend::PollingThreadFunc() {
 }
 
 void Iceoryx2ChannelBackend::EventLoopFunc() {
+  if (!options_.listener_thread_name.empty()) {
+    runtime::core::util::SetNameForCurrentThread(options_.listener_thread_name);
+  }
+  if (!options_.listener_thread_bind_cpu.empty()) {
+    runtime::core::util::BindCpuForCurrentThread(options_.listener_thread_bind_cpu);
+  }
+  if (!options_.listener_thread_sched_policy.empty()) {
+    runtime::core::util::SetCpuSchedForCurrentThread(options_.listener_thread_sched_policy);
+  }
+
   using namespace iox2;
 
   auto on_event = [this](WaitSetAttachmentId<ServiceType::Ipc> id) -> CallbackProgression {
@@ -542,10 +601,9 @@ void Iceoryx2ChannelBackend::EventLoopFunc() {
     // Check which subscriber(s) have events and process them
     std::lock_guard<std::mutex> lock(sub_mtx_);
 
-    for (size_t i = 0; i < waitset_guards_.size() && i < waitset_guard_urls_.size(); ++i) {
-      if (id.has_event_from(waitset_guards_[i]) || id.has_missed_deadline(waitset_guards_[i])) {
-        const auto& url = waitset_guard_urls_[i];
-        auto it = subscribers_.find(url);
+    for (const auto& entry : waitset_entries_) {
+      if (id.has_event_from(entry.guard) || id.has_missed_deadline(entry.guard)) {
+        auto it = subscribers_.find(entry.url);
         if (it != subscribers_.end()) {
           // Consume events from listener first
           it->second->ConsumeEvents();

@@ -15,7 +15,11 @@ struct convert<aimrt::plugins::iceoryx2_plugin::Iceoryx2Plugin::Options> {
     node["shm_init_size"] = rhs.shm_init_size;
     node["max_slice_len"] = rhs.max_slice_len;
     node["allocation_strategy"] = rhs.allocation_strategy;
+    node["node_name"] = rhs.node_name;
     node["listener_thread_name"] = rhs.listener_thread_name;
+    node["listener_thread_sched_policy"] = rhs.listener_thread_sched_policy;
+    node["listener_thread_bind_cpu"] = rhs.listener_thread_bind_cpu;
+    node["use_event_mode"] = rhs.use_event_mode;
     return node;
   }
 
@@ -28,8 +32,16 @@ struct convert<aimrt::plugins::iceoryx2_plugin::Iceoryx2Plugin::Options> {
       rhs.max_slice_len = node["max_slice_len"].as<uint64_t>();
     if (node["allocation_strategy"])
       rhs.allocation_strategy = node["allocation_strategy"].as<std::string>();
+    if (node["node_name"])
+      rhs.node_name = node["node_name"].as<std::string>();
     if (node["listener_thread_name"])
       rhs.listener_thread_name = node["listener_thread_name"].as<std::string>();
+    if (node["listener_thread_sched_policy"])
+      rhs.listener_thread_sched_policy = node["listener_thread_sched_policy"].as<std::string>();
+    if (node["listener_thread_bind_cpu"])
+      rhs.listener_thread_bind_cpu = node["listener_thread_bind_cpu"].as<std::vector<uint32_t>>();
+    if (node["use_event_mode"])
+      rhs.use_event_mode = node["use_event_mode"].as<bool>();
 
     return true;
   }
@@ -57,6 +69,8 @@ bool Iceoryx2Plugin::Initialize(runtime::core::AimRTCore* core_ptr) noexcept {
                                     SetPluginLogger();
                                   } catch (const std::exception& e) {
                                     AIMRT_ERROR("SetPluginLogger failed: {}", e.what());
+                                  } catch (...) {
+                                    AIMRT_ERROR("SetPluginLogger failed: unknown exception");
                                   }
                                 });
 
@@ -67,6 +81,8 @@ bool Iceoryx2Plugin::Initialize(runtime::core::AimRTCore* core_ptr) noexcept {
                                     RegisterIceoryx2ChannelBackend();
                                   } catch (const std::exception& e) {
                                     AIMRT_ERROR("RegisterIceoryx2ChannelBackend failed: {}", e.what());
+                                  } catch (...) {
+                                    AIMRT_ERROR("RegisterIceoryx2ChannelBackend failed: unknown exception");
                                   }
                                 });
 
@@ -75,6 +91,8 @@ bool Iceoryx2Plugin::Initialize(runtime::core::AimRTCore* core_ptr) noexcept {
     return true;
   } catch (const std::exception& e) {
     AIMRT_ERROR("Iceoryx2Plugin Initialize failed, {}", e.what());
+  } catch (...) {
+    AIMRT_ERROR("Iceoryx2Plugin Initialize failed: unknown exception");
   }
 
   return false;
@@ -88,6 +106,8 @@ void Iceoryx2Plugin::Shutdown() noexcept {
 
   } catch (const std::exception& e) {
     AIMRT_ERROR("Iceoryx2Plugin Shutdown failed, {}", e.what());
+  } catch (...) {
+    AIMRT_ERROR("Iceoryx2Plugin Shutdown failed: unknown exception");
   }
 }
 
@@ -100,19 +120,24 @@ void Iceoryx2Plugin::RegisterIceoryx2ChannelBackend() {
   // Create channel backend with plugin options
   auto iceoryx2_channel_backend_ptr = std::make_unique<Iceoryx2ChannelBackend>();
 
-  // Configure backend with plugin options
+  // Configure backend with plugin options (sync all fields)
   Iceoryx2ChannelBackend::Options backend_options;
   backend_options.shm_init_size = options_.shm_init_size;
   backend_options.max_slice_len = options_.max_slice_len;
   backend_options.allocation_strategy = options_.allocation_strategy;
+  backend_options.node_name = options_.node_name;
   backend_options.listener_thread_name = options_.listener_thread_name;
+  backend_options.listener_thread_sched_policy = options_.listener_thread_sched_policy;
+  backend_options.listener_thread_bind_cpu = options_.listener_thread_bind_cpu;
+  backend_options.use_event_mode = options_.use_event_mode;
 
   iceoryx2_channel_backend_ptr->SetOptions(backend_options);
 
-  AIMRT_INFO("Iceoryx2 config: shm={}MB, max_slice={}MB, strategy={}",
+  AIMRT_INFO("Iceoryx2 config: shm={}MB, max_slice={}MB, strategy={}, event_mode={}",
              options_.shm_init_size / (1024 * 1024),
              options_.max_slice_len / (1024 * 1024),
-             options_.allocation_strategy);
+             options_.allocation_strategy,
+             options_.use_event_mode);
 
   core_ptr_->GetChannelManager().RegisterChannelBackend(std::move(iceoryx2_channel_backend_ptr));
 }

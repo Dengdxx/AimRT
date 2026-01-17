@@ -4,6 +4,7 @@
 #pragma once
 
 #include <atomic>
+#include <vector>
 
 #include "aimrt_core_plugin_interface/aimrt_core_plugin_base.h"
 #include "runtime/core/aimrt_core.h"
@@ -21,10 +22,19 @@ class Iceoryx2Plugin : public AimRTCorePluginBase {
     uint64_t max_slice_len = 4 * 1024 * 1024;   // 4MB default per message
 
     // Allocation strategy: "static", "dynamic", "power_of_two"
+    // TODO: Currently only "dynamic" is implemented
     std::string allocation_strategy = "dynamic";
+
+    // Node name for process isolation (default: "aimrt_iox2_{pid}")
+    std::string node_name;
 
     // Listener thread configuration
     std::string listener_thread_name;
+    std::string listener_thread_sched_policy;        // e.g., "SCHED_FIFO", "SCHED_RR"
+    std::vector<uint32_t> listener_thread_bind_cpu;  // CPU affinity
+
+    // Event-based mode (WaitSet) vs polling mode
+    bool use_event_mode = true;
   };
 
  public:

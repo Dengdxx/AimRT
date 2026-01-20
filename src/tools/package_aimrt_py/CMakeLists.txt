@@ -57,8 +57,6 @@ if(AIMRT_BUILD_WITH_ROS2 AND AIMRT_BUILD_ROS2_PLUGIN)
 endif()
 
 include(PluginDetectTool)
-get_subdirectories(${PROJECT_SOURCE_DIR}/src/plugins PLUGIN_LIST)
-message(STATUS "Detected plugins: ${PLUGIN_LIST}")
 
 function(copy_plugin_if_enabled PLUGIN_NAME)
   string(TOUPPER ${PLUGIN_NAME} PLUGIN_BUILD_FLAG)
@@ -77,6 +75,18 @@ function(copy_plugin_if_enabled PLUGIN_NAME)
   endif()
 endfunction()
 
-foreach(PLUGIN_NAME ${PLUGIN_LIST})
-  copy_plugin_if_enabled(${PLUGIN_NAME})
-endforeach()
+function(aimrt_register_python_pkg_plugins)
+  # This file is processed before src/plugins is added, so plugin targets may
+  # not exist yet. Defer plugin collection/copy target registration until the
+  # end of the src/ directory so TARGET checks are meaningful.
+  set(AIMRT_PY_PKG_DIR ${CMAKE_BINARY_DIR}/aimrt_py_pkg)
+
+  get_subdirectories(${PROJECT_SOURCE_DIR}/src/plugins PLUGIN_LIST)
+  message(STATUS "Detected plugins: ${PLUGIN_LIST}")
+
+  foreach(PLUGIN_NAME ${PLUGIN_LIST})
+    copy_plugin_if_enabled(${PLUGIN_NAME})
+  endforeach()
+endfunction()
+
+cmake_language(DEFER DIRECTORY ${PROJECT_SOURCE_DIR}/src CALL aimrt_register_python_pkg_plugins)

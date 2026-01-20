@@ -3,6 +3,7 @@ name: daily Workflow
 on:
   schedule:
     - cron: '0 16 * * *'
+  workflow_dispatch:  # 允许手动触发
 jobs:
   daily:
     strategy:

@@ -2,7 +2,7 @@
 # All rights reserved.
 
 # Get the current folder name
-string(REGEX REPLACE ".*/\\(.*\\)" "\\1" CUR_DIR ${CMAKE_CURRENT_SOURCE_DIR})
+string(REGEX REPLACE ".*/\(.*\)" "\\1" CUR_DIR ${CMAKE_CURRENT_SOURCE_DIR})
 
 # Set namespace
 set_namespace()

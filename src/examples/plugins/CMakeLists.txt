@@ -23,6 +23,10 @@ if(AIMRT_BUILD_ICEORYX_PLUGIN)
   add_subdirectory(iceoryx_plugin)
 endif()
 
+if(AIMRT_BUILD_ICEORYX2_PLUGIN)
+  add_subdirectory(iceoryx2_plugin)
+endif()
+
 if(AIMRT_BUILD_WITH_PROTOBUF
    AND AIMRT_BUILD_WITH_ROS2
    AND AIMRT_BUILD_ROS2_PLUGIN

@@ -29,7 +29,7 @@ aimrt:
   plugin:
     plugins:
       - name: iceoryx2_plugin
-        path: /path/to/aimrt_iceoryx2_plugin.so
+        path: /path/to/libaimrt_iceoryx2_plugin.so
         options:
           max_slice_len: 4194304      # 4MB per message
           node_name: "my_vision_node" # 可选，进程隔离标识
@@ -86,7 +86,7 @@ CMake 会自动从 GitHub 拉取 iceoryx2 源码并编译：
 ```bash
 cd build
 cmake .. -DAIMRT_BUILD_ICEORYX2_PLUGIN=ON
-make aimrt_iceoryx2_plugin -j$(nproc)
+make libaimrt_iceoryx2_plugin -j$(nproc)
 ```
 
 首次编译会下载约 50MB 源码并编译 Rust 库，耗时约 2-5 分钟。

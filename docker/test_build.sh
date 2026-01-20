@@ -83,7 +83,7 @@ cmake --build build_test --config Release --parallel 8 --target aimrt_iceoryx2_p
 
 echo ""
 echo "=== Build Results ==="
-ls -lh build_test/aimrt_iceoryx2_plugin.so 2>/dev/null || ls -lh build_test/libaimrt_iceoryx2_plugin.so 2>/dev/null || echo "Plugin not found at expected location"
+ls -lh build_test/libaimrt_iceoryx2_plugin.so 2>/dev/null || ls -lh build_test/aimrt_iceoryx2_plugin.so 2>/dev/null || echo "Plugin not found at expected location"
 
 echo ""
 echo "=== Building Tests ==="

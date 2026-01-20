@@ -5,7 +5,7 @@ aimrt:
   plugin:
     plugins:
       - name: iceoryx2_plugin
-        path: ./aimrt_iceoryx2_plugin.so
+        path: ./libaimrt_iceoryx2_plugin.so
         options:
           max_slice_len: 4194304  # 4MB
           use_event_mode: true
